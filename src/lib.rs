@@ -9,7 +9,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-#[derive(PartialEq, Hash, Eq)]
+#[derive(PartialEq, Hash, Eq, Clone)]
 enum Type {
     /// _|_
     Unit,
@@ -47,15 +47,15 @@ enum TypeVar {
     Free(String),
 }
 
-#[derive(PartialEq, Hash, Eq)]
+#[derive(PartialEq, Hash, Eq, Clone)]
 enum Scope {
     Bound(Box<Type>),
     Unbound(VarId),
 }
 
-/// PolyType = `Forall [a b c]. a -> b -> c`
+/// Types that contains variable bound by zero or more forall
 struct PolyType {
-    vars: Vec<TypeVar>,
+    vars: Vec<VarId>,
     t: Box<Type>,
 }
 
@@ -67,6 +67,15 @@ impl PolyType {
     /// Marks a type as not generalizable
     fn dont_generalize(t: Type) -> PolyType {
         todo!()
+    }
+
+    // Specialize a polytype by replacing bound type variables by new monotype variables
+    fn inst(&self) -> Type {
+        let mut type_table: HashMap<VarId, Type> = HashMap::new();
+        for var_id in self.vars.iter() {
+            type_table.insert(*var_id, Type::new_var());
+        }
+        self.t.replace_vars(&type_table)
     }
 }
 
@@ -91,63 +100,46 @@ impl Type {
         Type::Var(Scope::Unbound(id))
     }
 
-    fn replace_vars(&self, table: &TypeTable) -> PolyType {
+    /// Replace vars that can be found in the table. Leave they if not found
+    fn replace_vars(&self, table: &HashMap<VarId, Type>) -> Self {
         match self {
-            Type::Unit => PolyType::dont_generalize(Type::Unit),
-            Type::Var(var) => match var {
-                Scope::Bound(box t) => t.replace_vars(table),
-                Scope::Unbound(id) => match table.lookup(id) {
-                    Some(t) => t.replace_vars(table),
-                    None => PolyType::dont_generalize(Type::new_var()),
-                },
+            Type::Unit => Type::Unit,
+            Type::Var(Scope::Bound(box t)) => t.replace_vars(table),
+            Type::Var(Scope::Unbound(id)) => match table.get(&id) {
+                Some(t) => t.clone(),
+                None =>  Type::Var(Scope::Unbound(*id))
             },
-            Type::Arrow(a, b) => {
-                todo!()
+            Type::Arrow(box a, box b) => {
+                Type::Arrow(Box::new(a.replace_vars(table)), Box::new(b.replace_vars(table)))
             }
-        };
-
-        todo!()
+        }
     }
 }
 
 struct Env {
-    bindings: HashMap<String, PolyType>,
-}
-
-struct TypeTable {
-    bindings: HashMap<VarId, Type>,
-}
-
-impl TypeTable {
-    fn lookup(&self, x: &VarId) -> Option<&Type> {
-        self.bindings.get(x)
-    }
-    // Instantiates a polytype by replacing the type vars with fresh type vars
-    fn inst(&mut self, type_: &PolyType) {
-        todo!()
-    }
+    polytypes: HashMap<String, PolyType>,
 }
 
 impl Env {
-    fn lookup(&self, x: &str) -> Option<&PolyType> {
-        self.bindings.get(x)
-    }
-    fn infer(&mut self, expr: Expr, type_table: &mut TypeTable) -> anyhow::Result<Type> {
+    fn infer(&mut self, expr: Expr) -> anyhow::Result<Type> {
         match expr {
             // Var rule
-            // x : a ∈ Γ  t = inst(a)
+            // x : polytype_a ∈ Γ  t = inst(polytype_a)
             // -----------------------
             // Γ ⊢ x : t
             Expr::Identifier(x) => {
                 let a = self
-                    .lookup(&x)
+                    .polytypes
+                    .get(&x)
                     .ok_or_else(|| anyhow::anyhow!("Unbound variable"))?;
-                let t = type_table.inst(a);
+                let t = PolyType::inst(a);
+                Ok(t)
             }
+            // Lambda rule
+            // t = newvar()  Γ, x :   
             Expr::Lambda(_, _) => todo!(),
             Expr::Apply(_, _) => todo!(),
             Expr::Let(_, _, _) => todo!(),
         }
-        todo!()
     }
 }
