@@ -1,5 +1,8 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
+    /// Unit value
+    /// `()`
+    Unit,
     /// Identifier
     /// `x`
     Identifier(String),

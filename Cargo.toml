@@ -7,4 +7,3 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "*" }
-chumsky = "0.9.3"

@@ -27,12 +27,6 @@ pub enum Type {
 /// https://okmij.org/ftp/ML/generalization.html#levels
 static LEVEL: AtomicUsize = AtomicUsize::new(0);
 
-#[derive(PartialEq, Eq)]
-struct BoundVar {
-    bounded: Type,
-    level: i32,
-}
-
 fn enter_level() {
     LEVEL.fetch_add(1, Ordering::Relaxed);
 }
@@ -44,8 +38,13 @@ type VarId = usize;
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub enum TypeVar {
-    Bound { t: Type },
-    Unbound { id: VarId, level: RefCell<usize> },
+    Bound {
+        t: Type,
+    },
+    Unbound {
+        id: VarId,
+        level: Rc<RefCell<usize>>,
+    },
 }
 
 /// Types that contains variable bound by zero or more forall
@@ -142,8 +141,22 @@ impl Type {
         let id = TYPEVAR_ID.fetch_add(1, Ordering::Relaxed);
         Type::Var(Rc::new(RefCell::new(TypeVar::Unbound {
             id,
-            level: RefCell::new(LEVEL.load(Ordering::Relaxed)),
+            level: Rc::new(RefCell::new(LEVEL.load(Ordering::Relaxed))),
         })))
+    }
+
+    /// Unwrap the inner type of a Bound Var
+    /// let bound_var = Expr::Var(Rc::new(RefCell::new { value: TypeVar::Bound { t: Type::Int } }));
+    /// assert_eq!(bound_var.unwrap_boundvar(), Some(Type::Int))
+    /// ```
+    pub fn unwrap_boundvar(&self) -> Option<Type> {
+        match self {
+            Type::Var(tv) => match &*tv.borrow() {
+                TypeVar::Bound { t } => Some(t.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Replace vars that can be found in the table. Leave they if not found
@@ -165,6 +178,28 @@ impl Type {
         }
     }
 
+    /// Check if a mono Var(a) can be found in a type
+    pub fn occurs_check(&self, id: usize, level: usize) -> bool {
+        fn occurs_check_impl(a_id: usize, a_level: usize, type_: &Type) -> bool {
+            match type_ {
+                Type::Unit => false,
+                Type::Int => false,
+                Type::Var(tv) => match &*tv.borrow() {
+                    TypeVar::Bound { t } => occurs_check_impl(a_id, a_level, &t),
+                    TypeVar::Unbound { id, level } => {
+                        let min = std::cmp::min(a_level, *level.borrow());
+                        level.replace(min);
+                        a_id == *id
+                    }
+                },
+                Type::Arrow(box f, box body) => {
+                    occurs_check_impl(a_id, a_level, f) || occurs_check_impl(a_id, a_level, body)
+                }
+            }
+        }
+        occurs_check_impl(id, level, self)
+    }
+
     /// Unify algorithm in J performs mutation, so it doesnt return another type
     pub fn unify(&self, other: &Type) -> anyhow::Result<()> {
         match (self, other) {
@@ -178,7 +213,7 @@ impl Type {
                             return Ok(());
                         }
 
-                        if occurs_check(*id, *level.borrow(), b) {
+                        if b.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
                         let b_bound = TypeVar::Bound { t: b.clone() };
@@ -196,7 +231,7 @@ impl Type {
                             return Ok(());
                         }
 
-                        if occurs_check(*id, *level.borrow(), a) {
+                        if a.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
                         let a_bound = TypeVar::Bound { t: a.clone() };
@@ -211,25 +246,6 @@ impl Type {
                 Ok(())
             }
             (a, b) => bail!("Type Error {a:?} with {b:?}"),
-        }
-    }
-}
-
-/// Check if a mono Var(a) can be found in a type
-fn occurs_check(a_id: VarId, a_level: usize, type_: &Type) -> bool {
-    match type_ {
-        Type::Unit => false,
-        Type::Int => false,
-        Type::Var(tv) => match &*tv.borrow() {
-            TypeVar::Bound { t } => occurs_check(a_id, a_level, &t),
-            TypeVar::Unbound { id, level } => {
-                let min = std::cmp::min(a_level, *level.borrow());
-                level.replace(min);
-                a_id == *id
-            }
-        },
-        Type::Arrow(box f, box body) => {
-            occurs_check(a_id, a_level, f) || occurs_check(a_id, a_level, body)
         }
     }
 }
@@ -251,6 +267,10 @@ impl Env {
     }
     pub fn infer(&mut self, expr: Expr) -> anyhow::Result<Type> {
         match expr {
+            // Unit rule
+            // -----------------------
+            // Γ ⊢ () : unit
+            Expr::Unit => Ok(Type::Unit),
             // Var rule
             // x : polytype_a ∈ Γ  t = inst(polytype_a)
             // -----------------------
@@ -284,43 +304,41 @@ impl Env {
             // --------------------
             // Γ ⊢ e0 e1 : t'
             Expr::Apply(box f, box x) => {
-                let t0 = self.infer(f)?;
-                let t1 = self.infer(x)?;
-                let t_prime = Type::new_var();
+                let t0 = self.infer(f)?; // a -> a
+                let t1 = self.infer(x)?; // int
+                let t_prime = Type::new_var(); // ?
                 t0.unify(&Type::Arrow(
                     Box::new(t1.clone()),
                     Box::new(t_prime.clone()),
                 ))?;
-                Ok(t0)
+                Ok(t_prime)
             }
             // Let rule
             // t = infer env e0
-            // t' = infer new_env_with_x_e0 e1
+            // t' = infer new_env_with_x_e1 e2
             // --------------------
-            // Γ ⊢ let x = e0 in e1 : t'
-            Expr::Let(x, box e0, box e1) => {
+            // Γ ⊢ let x = e1 in e2 : t'
+            Expr::Let(x, box e1, box e2) => {
                 enter_level();
-                let t = self.infer(e0)?;
+                let t = self.infer(e1)?;
                 exit_level();
 
                 let mut new_env = self.clone();
                 let generalized_t = PolyType::generalize(t);
                 new_env.insert(x, generalized_t);
-                let t_prime = new_env.infer(e1)?;
+                let t_prime = new_env.infer(e2)?;
                 Ok(t_prime)
             }
         }
     }
 }
 
-// with debrujin index and levels, we can generalize HM to System-F
-// allowing for higher rank polymorphism
-
 #[test]
-fn test_expr() {
-    // let id = \x -> x
-    // id 1
-    let let_test = Expr::Let(
+fn test_id() {
+    // let id = fun x -> x in id 1
+    // id : 'a -> 'a
+    // id 1 : int
+    let id_test = Expr::Let(
         "id".to_string(),
         Box::new(Expr::Lambda(
             "x".to_string(),
@@ -333,6 +351,6 @@ fn test_expr() {
     );
 
     let mut env = Env { polytypes: vec![] };
-    let result = env.infer(let_test).unwrap();
-    assert_eq!(result, Type::Int)
+    let result = env.infer(id_test).unwrap().unwrap_boundvar();
+    assert_eq!(result, Some(Type::Int))
 }
