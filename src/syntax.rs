@@ -19,3 +19,8 @@ pub enum Expr {
     /// `let f = e1 in e2`
     Let(String, Box<Expr>, Box<Expr>),
 }
+
+#[derive(Debug)]
+pub enum Stmt {
+    Def(String, Expr),
+}

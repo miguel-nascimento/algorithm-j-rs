@@ -1,0 +1,37 @@
+use std::str::FromStr;
+use algo_j::syntax::{Expr, Stmt};
+
+#[LALR]
+grammar;
+
+
+pub Stmt: Stmt = {
+    "let" <x:Ident> "=" <e:Expr> ";" => Stmt::Def(x, e),
+    "let" <x:Ident> "=" <e1:Expr> "in" <e2:Expr> ";" => Stmt::Def(x.clone(), Expr::Let(x, Box::new(e1), Box::new(e2))),
+};
+
+Expr: Expr = {
+    Terminal,
+    <l:Terminal> <r:Expr> => Expr::Apply(Box::new(l), Box::new(r)),
+    "fun" <x:Ident> "->" <expr:Expr> => Expr::Lambda(x, Box::new(expr)),
+    Let => <>,
+};
+
+Ident: String = {
+    r"[a-zA-Z_][a-zA-Z0-9_]*" => String::from_str(<>).unwrap(),
+};
+
+Let: Expr = {
+    "let" <x:Ident> "=" <e1:Expr> "in" <e2:Expr> => Expr::Let(x, Box::new(e1), Box::new(e2)),
+};
+
+Terminal: Expr = {
+    Int => Expr::Int(<>),
+    "()" => Expr::Unit,
+    Ident => Expr::Identifier(<>),
+    "(" <Expr> ")",
+};
+
+Int: i32 = {
+    r"[0-9]+" => i32::from_str(<>).unwrap(),
+};
