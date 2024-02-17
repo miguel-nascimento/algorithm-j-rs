@@ -30,12 +30,7 @@ Let: Expr = {
 };
 
 Terminal: Expr = {
-    Int => Expr::Int(<>),
     "()" => Expr::Unit,
     Ident => Expr::Identifier(<>),
     "(" <Expr> ")",
-};
-
-Int: i32 = {
-    r"[0-9]+" => i32::from_str(<>).unwrap(),
 };

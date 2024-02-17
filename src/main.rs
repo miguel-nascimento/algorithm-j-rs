@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::atomic::Ordering};
 
-use algo_j::{hm::{Env, TYPEVAR_ID}, syntax::expand_all_lets};
+use algo_j::{
+    hm::{Env, TYPEVAR_ID},
+    syntax::expand_all_lets,
+};
 use colored::Colorize;
 use lalrpop_util::lalrpop_mod;
 

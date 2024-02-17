@@ -1,7 +1,7 @@
-use crate::syntax::Expr;
 /// Implementation of the Hindley-Milner type system
 /// https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system
 /// using the Algorithm J
+use crate::syntax::Expr;
 use anyhow::{anyhow, bail};
 use std::{
     cell::RefCell,
@@ -151,20 +151,6 @@ impl Type {
         })))
     }
 
-    /// Unwrap the inner type of a Bound Var
-    /// let bound_var = Expr::Var(Rc::new(RefCell::new { value: TypeVar::Bound { t: Type::Int } }));
-    /// assert_eq!(bound_var.unwrap_boundvar(), Some(Type::Int))
-    /// ```
-    pub fn unwrap_boundvar(&self) -> Option<Type> {
-        match self {
-            Type::Var(tv) => match &*tv.borrow() {
-                TypeVar::Bound { t } => Some(t.clone()),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
     /// Replace vars that can be found in the table. Leave they if not found
     fn replace_vars(&self, table: &HashMap<VarId, Type>) -> Self {
         match self {
@@ -213,7 +199,7 @@ impl Type {
         }
     }
 
-    /// Unify algorithm in J performs mutation, so it doesnt return another type
+    /// Unify algorithm in J performs mutation.
     pub fn unify(&self, other: &Type) -> anyhow::Result<()> {
         match (self, other) {
             (Type::Unit, Type::Unit) => Ok(()),
@@ -226,10 +212,6 @@ impl Type {
                 match &mut *var {
                     TypeVar::Bound { t: a } => a.unify(b),
                     TypeVar::Unbound { id, level } => {
-                        // FIXME: check if its right
-                        // if &self == &other {
-                        //     return Ok(());
-                        // }
                         if b.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
@@ -248,11 +230,6 @@ impl Type {
                 match &mut *var {
                     TypeVar::Bound { t: b } => b.unify(a),
                     TypeVar::Unbound { id, level } => {
-                        // FIXME: check if its right
-                        // if &self == &other {
-                        //     return Ok(());
-                        // }
-
                         if a.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
@@ -293,10 +270,6 @@ impl Env {
             // -----------------------
             // Γ ⊢ () : unit
             Expr::Unit => Ok(Type::Unit),
-            // Int rule
-            // -----------------------
-            // Γ ⊢ n where n is Int : Int
-            Expr::Int(_) => Ok(Type::Int),
             // Var rule
             // x : polytype_a ∈ Γ  t = inst(polytype_a)
             // -----------------------

@@ -10,9 +10,6 @@ pub enum Expr {
     /// Identifier
     /// `x`
     Identifier(String),
-    /// Int values
-    /// `123`
-    Int(i32),
     /// Lambda abstraction
     /// `\x -> e`
     Lambda(String, Box<Expr>),
@@ -33,7 +30,6 @@ impl Display for Expr {
         match self {
             Expr::Unit => write!(f, "()"),
             Expr::Identifier(id) => write!(f, "{id}"),
-            Expr::Int(int) => write!(f, "{}", int),
             Expr::Lambda(x, body) => write!(f, "fun {} -> {}", x, body),
             Expr::Apply(e1, e2) => {
                 if should_parenthesize(e1) {

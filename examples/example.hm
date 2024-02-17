@@ -1,9 +1,14 @@
-let id = fun x -> x;
 let unit = id ();
 let perform = fun x -> x ();
 
+let id = fun x -> x;
 let true = fun x -> fun y -> x;
 let false = fun x -> fun y -> y;
 let if = fun b -> fun x -> fun y -> b x y;
-let add = fun m -> fun n -> fun f -> fun x ->  m f (n f x);
 
+let zero = fun f -> fun x -> x;
+let one = fun f -> fun x -> f x;
+let two = fun f -> fun x -> f f x;
+
+let succ = fun n -> fun f -> fun x -> f (n f x);
+let pred = fun n -> fun f -> fun x -> n (fun g -> fun h -> h (g f)) (fun u -> x) (fun u -> u);
