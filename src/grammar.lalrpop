@@ -10,6 +10,10 @@ pub Stmt: Stmt = {
     "let" <x:Ident> "=" <e1:Expr> "in" <e2:Expr> ";" => Stmt::Def(x.clone(), Expr::Let(x, Box::new(e1), Box::new(e2))),
 };
 
+pub Stmts: Vec<Stmt> = {
+    <stmts:Stmt*> => stmts,
+};
+
 Expr: Expr = {
     Terminal,
     <l:Terminal> <r:Expr> => Expr::Apply(Box::new(l), Box::new(r)),

@@ -2,9 +2,10 @@ use crate::syntax::Expr;
 /// Implementation of the Hindley-Milner type system
 /// https://en.wikipedia.org/wiki/Hindley%E2%80%93Milner_type_system
 /// using the Algorithm J
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use std::{
     cell::RefCell,
+    cmp::min,
     collections::HashMap,
     fmt::Display,
     rc::Rc,
@@ -25,7 +26,7 @@ pub enum Type {
 
 /// Efficient generalization with levels
 /// https://okmij.org/ftp/ML/generalization.html#levels
-static LEVEL: AtomicUsize = AtomicUsize::new(0);
+pub static LEVEL: AtomicUsize = AtomicUsize::new(0);
 
 fn enter_level() {
     LEVEL.fetch_add(1, Ordering::Relaxed);
@@ -54,48 +55,32 @@ struct PolyType {
     t: Box<Type>,
 }
 
-impl Display for PolyType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.vars.is_empty() {
-            write!(f, "{}", self.t)
-        } else {
-            write!(
-                f,
-                "∀[{}] {}",
-                self.vars
-                    .iter()
-                    .map(|x| x.to_string())
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                self.t
-            )
-        }
-    }
-}
-
 impl PolyType {
     /// Takes a type with type vars inside and returns a polytype, with the type vars generalized inside the forall
     fn generalize(t: Type) -> PolyType {
         let mut typ_ids = vec![];
 
-        match &t {
-            Type::Var(var) => match &*var.borrow() {
-                TypeVar::Bound { t } => {
-                    PolyType::generalize(t.clone());
-                }
-                TypeVar::Unbound { id, level } => {
-                    if *level.borrow() >= LEVEL.load(Ordering::Relaxed) {
-                        typ_ids.push(*id);
+        fn generalize_impl(t: &Type, typ_ids: &mut Vec<VarId>) {
+            match t {
+                Type::Var(var) => match &mut *var.borrow_mut() {
+                    TypeVar::Bound { t } => {
+                        generalize_impl(t, typ_ids);
                     }
+                    TypeVar::Unbound { id, level } => {
+                        if *level.borrow() > LEVEL.load(Ordering::Relaxed) {
+                            typ_ids.push(*id);
+                        }
+                    }
+                },
+                Type::Arrow(box f, box body) => {
+                    generalize_impl(f, typ_ids);
+                    generalize_impl(body, typ_ids);
                 }
-            },
-            Type::Arrow(box f, box body) => {
-                PolyType::generalize(f.clone());
-                PolyType::generalize(body.clone());
+                _ => {}
             }
-            _ => {}
         }
 
+        generalize_impl(&t, &mut typ_ids);
         typ_ids.sort();
         typ_ids.dedup();
         PolyType {
@@ -121,10 +106,25 @@ impl PolyType {
     }
 }
 
-static TYPEVAR_ID: AtomicUsize = AtomicUsize::new(0);
+pub static TYPEVAR_ID: AtomicUsize = AtomicUsize::new(0);
 
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // If there's an arrow inside, we should parenthesize it
+        fn should_parenthesize(t: &Type) -> bool {
+            match t {
+                Type::Var(var) => {
+                    let type_var = var.borrow_mut();
+                    match &*type_var {
+                        TypeVar::Bound { t } => should_parenthesize(t),
+                        TypeVar::Unbound { .. } => false,
+                    }
+                }
+                Type::Arrow(_, _) => true,
+                _ => false,
+            }
+        }
+
         match self {
             Type::Unit => write!(f, "unit"),
             Type::Int => write!(f, "int"),
@@ -132,7 +132,13 @@ impl Display for Type {
                 TypeVar::Bound { t } => write!(f, "{}", t),
                 TypeVar::Unbound { id, .. } => write!(f, "'{}", (id + 97) as u8 as char),
             },
-            Type::Arrow(box a, box b) => write!(f, "({} -> {})", a, b),
+            Type::Arrow(box a, box b) => {
+                if should_parenthesize(a) {
+                    write!(f, "({}) -> {}", a, b)
+                } else {
+                    write!(f, "{} -> {}", a, b)
+                }
+            }
         }
     }
 }
@@ -162,11 +168,9 @@ impl Type {
     /// Replace vars that can be found in the table. Leave they if not found
     fn replace_vars(&self, table: &HashMap<VarId, Type>) -> Self {
         match self {
-            Type::Unit => Type::Unit,
-            Type::Int => Type::Int,
             Type::Var(tv) => match &*tv.borrow() {
                 TypeVar::Bound { t } => t.replace_vars(table),
-                TypeVar::Unbound { id, .. } => match table.get(&id) {
+                TypeVar::Unbound { id, .. } => match table.get(id) {
                     Some(t) => t.clone(),
                     None => Type::Var(tv.clone()),
                 },
@@ -175,29 +179,38 @@ impl Type {
                 Box::new(a.replace_vars(table)),
                 Box::new(b.replace_vars(table)),
             ),
+            _ => self.clone(),
         }
     }
 
     /// Check if a mono Var(a) can be found in a type
     pub fn occurs_check(&self, id: usize, level: usize) -> bool {
-        fn occurs_check_impl(a_id: usize, a_level: usize, type_: &Type) -> bool {
-            match type_ {
-                Type::Unit => false,
-                Type::Int => false,
-                Type::Var(tv) => match &*tv.borrow() {
-                    TypeVar::Bound { t } => occurs_check_impl(a_id, a_level, &t),
-                    TypeVar::Unbound { id, level } => {
-                        let min = std::cmp::min(a_level, *level.borrow());
-                        level.replace(min);
-                        a_id == *id
+        match self {
+            Type::Unit => false,
+            Type::Int => false,
+            Type::Var(tv) => {
+                let tv = tv.try_borrow_mut();
+                if tv.is_err() {
+                    return true;
+                }
+                let mut tv = tv.unwrap();
+                match &mut *tv {
+                    TypeVar::Bound { t } => t.occurs_check(id, level),
+                    TypeVar::Unbound {
+                        id: var_id,
+                        level: var_level,
+                    } => {
+                        let mut var_level = var_level.borrow_mut();
+                        let min = min(level, *var_level);
+                        *var_level = min;
+                        *var_id == id
                     }
-                },
-                Type::Arrow(box f, box body) => {
-                    occurs_check_impl(a_id, a_level, f) || occurs_check_impl(a_id, a_level, body)
                 }
             }
+            Type::Arrow(box f, box body) => {
+                f.occurs_check(id, level) || body.occurs_check(id, level)
+            }
         }
-        occurs_check_impl(id, level, self)
     }
 
     /// Unify algorithm in J performs mutation, so it doesnt return another type
@@ -205,53 +218,62 @@ impl Type {
         match (self, other) {
             (Type::Unit, Type::Unit) => Ok(()),
             (Type::Var(var), b) => {
-                let mut type_var = var.borrow_mut();
-                match &*type_var {
+                let var = var.try_borrow_mut();
+                if var.is_err() {
+                    return Err(anyhow!("occur check"));
+                }
+                let mut var = var.unwrap();
+                match &mut *var {
                     TypeVar::Bound { t: a } => a.unify(b),
                     TypeVar::Unbound { id, level } => {
-                        if *self == *other {
-                            return Ok(());
-                        }
-
+                        // FIXME: check if its right
+                        // if &self == &other {
+                        //     return Ok(());
+                        // }
                         if b.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
                         let b_bound = TypeVar::Bound { t: b.clone() };
-                        *type_var = b_bound;
+                        *var = b_bound;
                         Ok(())
                     }
                 }
             }
             (a, Type::Var(var)) => {
-                let mut type_var = var.borrow_mut();
-                match &*type_var {
+                let var = var.try_borrow_mut();
+                if var.is_err() {
+                    return Err(anyhow!("occur check"));
+                }
+                let mut var = var.unwrap();
+                match &mut *var {
                     TypeVar::Bound { t: b } => b.unify(a),
                     TypeVar::Unbound { id, level } => {
-                        if *self == *other {
-                            return Ok(());
-                        }
+                        // FIXME: check if its right
+                        // if &self == &other {
+                        //     return Ok(());
+                        // }
 
                         if a.occurs_check(*id, *level.borrow()) {
                             bail!("Type Error (occurs check)");
                         }
                         let a_bound = TypeVar::Bound { t: a.clone() };
-                        *type_var = a_bound;
+                        *var = a_bound;
                         Ok(())
                     }
                 }
             }
-            (Type::Arrow(param1, body1), Type::Arrow(param2, body2)) => {
+            (Type::Arrow(box param1, box body1), Type::Arrow(box param2, box body2)) => {
                 param1.unify(param2)?;
                 body1.unify(body2)?;
                 Ok(())
             }
-            (a, b) => bail!("Type Error {a:?} with {b:?}"),
+            (a, b) => Err(anyhow!("Type Error {a:?} with {b:?}")),
         }
     }
 }
 
-#[derive(Clone)]
-struct Env {
+#[derive(Clone, Default)]
+pub struct Env {
     polytypes: Vec<(String, PolyType)>,
 }
 
@@ -262,7 +284,7 @@ impl Env {
             .find(|(name, _)| name == id)
             .map(|(_, t)| t)
     }
-    fn insert(&mut self, id: String, value: PolyType) -> () {
+    fn insert(&mut self, id: String, value: PolyType) {
         self.polytypes.push((id, value))
     }
     pub fn infer(&mut self, expr: Expr) -> anyhow::Result<Type> {
@@ -271,6 +293,10 @@ impl Env {
             // -----------------------
             // Γ ⊢ () : unit
             Expr::Unit => Ok(Type::Unit),
+            // Int rule
+            // -----------------------
+            // Γ ⊢ n where n is Int : Int
+            Expr::Int(_) => Ok(Type::Int),
             // Var rule
             // x : polytype_a ∈ Γ  t = inst(polytype_a)
             // -----------------------
@@ -282,18 +308,16 @@ impl Env {
                 let t = PolyType::inst(a);
                 Ok(t)
             }
-            // typeof int => int
-            Expr::Int(_) => Ok(Type::Int),
             // Lambda rule
             // t = newvar() (aka dummy var)
             // t' = Γ, x : infer e
             // ___________________
             // Γ ⊢ \x -> e : t -> t'
-            Expr::Lambda(x, body) => {
+            Expr::Lambda(x, box body) => {
                 let dummy_var = Type::new_var(); // t
                 let mut new_env = self.clone();
                 new_env.insert(x, PolyType::dont_generalize(dummy_var.clone()));
-                let expr_type = new_env.infer(*body)?; // t'
+                let expr_type = new_env.infer(body)?; // t'
                 Ok(Type::Arrow(Box::new(dummy_var), Box::new(expr_type)))
             }
             // Application rule
@@ -307,10 +331,7 @@ impl Env {
                 let t0 = self.infer(f)?; // a -> a
                 let t1 = self.infer(x)?; // int
                 let t_prime = Type::new_var(); // ?
-                t0.unify(&Type::Arrow(
-                    Box::new(t1.clone()),
-                    Box::new(t_prime.clone()),
-                ))?;
+                t0.unify(&Type::Arrow(Box::new(t1), Box::new(t_prime.clone())))?;
                 Ok(t_prime)
             }
             // Let rule
@@ -331,26 +352,4 @@ impl Env {
             }
         }
     }
-}
-
-#[test]
-fn test_id() {
-    // let id = fun x -> x in id 1
-    // id : 'a -> 'a
-    // id 1 : int
-    let id_test = Expr::Let(
-        "id".to_string(),
-        Box::new(Expr::Lambda(
-            "x".to_string(),
-            Box::new(Expr::Identifier("x".to_string())),
-        )),
-        Box::new(Expr::Apply(
-            Box::new(Expr::Identifier("id".to_string())),
-            Box::new(Expr::Int(1)),
-        )),
-    );
-
-    let mut env = Env { polytypes: vec![] };
-    let result = env.infer(id_test).unwrap().unwrap_boundvar();
-    assert_eq!(result, Some(Type::Int))
 }

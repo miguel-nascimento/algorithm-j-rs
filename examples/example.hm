@@ -1,16 +1,9 @@
 let id = fun x -> x;
+let unit = id ();
+let perform = fun x -> x ();
 
 let true = fun x -> fun y -> x;
 let false = fun x -> fun y -> y;
 let if = fun b -> fun x -> fun y -> b x y;
+let add = fun m -> fun n -> fun f -> fun x ->  m f (n f x);
 
-let zero = fun s -> fun z -> z;
-let succ = fun n -> fun s -> fun z -> s (n s z);
-
-let one = succ zero;
-let two = succ one;
-let three = succ two;
-let four = succ three;
-let five = succ four;
-
-let one_or_two = fun cond -> if cond one two

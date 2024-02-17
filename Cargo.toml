@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = { version = "*" }
 lalrpop-util = { version = "0.20.0", features = ["lexer", "unicode"] }
+colored = "2.1.0"
 
 [build-dependencies]
 lalrpop = "0.20.0"
